@@ -1,0 +1,235 @@
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(SeuratData)
+# Load the PBMC dataset
+data_dir <- "C:/Downloads/sample_filtered_feature_bc_matrix"
+pbmc.data <- Read10X(data.dir = data_dir)
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "PBMCs_Sample11", min.cells = 3, min.features = 200)
+pbmc
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^mt-")
+################
+# Perform subsetting based on criteria
+obj1 <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & percent.mt < 8 & nCount_RNA <10000 & nCount_RNA >2000)
+initial_cell_count <- ncol(obj1)
+# # Visualize QC metrics as a violin plot
+# Use plots for QC metrics to filter cells
+png('vlnplot_qcf.png', width = 1200, height = 1200)
+VlnPlot(obj1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),ncol = 3, assay = "RNA" )
+dev.off()
+########################################################################################################################################
+#Combine samples into one object
+sampleN.data <- Read10X(data.dir ="C:/Users/karen/Documents/NIH_project/Transcriptomics/SC3_v3_NextGem_DI_CellPlex_Mouse_PBMC_10K_PBMCs_mouse_1_count_sample_feature_bc_matrix/sample_feature_bc_matrix")
+pbmc2 <- sampleN.data[["Gene Expression"]]
+pbmc2 <- CreateSeuratObject(counts = sampleN.data[["Gene Expression"]], project = "SAMPLEN", min.cells = 3, min.features = 200)
+pbmc2[["percent.mt"]] <- PercentageFeatureSet(pbmc2, pattern = "^mt-")
+obj2 <- subset(pbmc2, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & percent.mt < 8 & nCount_RNA <10000 & nCount_RNA >2000)
+# For object 1 (KLH)
+obj1@meta.data$condition <- "KLH"
+# For object 2 (Neg)
+obj2@meta.data$condition <- "Neg"
+initial_cell_count2 <- ncol(obj2)
+print(initial_cell_count)
+print(initial_cell_count2)
+###############################################  DOWNSAMPLE TO HAVE SAME NUMBER OF CELLS IN BOTH GROUPS/MERGE #########################################################################################
+# Downsample the number of cells per identity class
+subset_obj1<- subset(x = obj1, downsample = 2887)
+#merge both objects
+pbmc.merge1 <- merge(subset_obj1, y = c(obj2), add.cell.ids = c("Sample11", "Sample1"))
+View(pbmc.merge)
+norm <- NormalizeData(pbmc.merge1)
+pbmc.merge<- FindVariableFeatures(norm)
+pbmc.merge<- ScaleData(pbmc.merge)
+pbmc.merge <- RunPCA(pbmc.merge)
+#perform integration after PCA
+pbmc.merge <- IntegrateLayers(object = pbmc.merge ,method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca",verbose = FALSE)
+print(pbmc.merge@reductions$pca)
+#re-join layers after integration
+pbmc.merge[["RNA"]] <- JoinLayers(pbmc.merge[["RNA"]])
+# Find neighbors and clusters
+pbmc.merge <- FindNeighbors(pbmc.merge, reduction = "integrated.cca",dims = 1:30)
+pbmc.merge <- FindClusters(pbmc.merge, resolution = 1)
+# Run UMAP for visualization
+pbmc.merge <- RunUMAP(pbmc.merge, dims = 1:30, reduction="integrated.cca")
+
+# Plot to inspect clusters
+DimPlot(pbmc.merge, reduction = "umap", label = TRUE)
+# Save the plot directly
+ggsave("umap_plot_KLH_Neg.png", plot = DimPlot(pbmc.merge, reduction = "umap", label = TRUE), width = 10, height = 8, dpi = 300)
+condi <-DimPlot(pbmc.merge, reduction = "umap", label = TRUE, group.by = "condition")
+# Save the plot directly
+ggsave("umap_plot_KLH_Neg_Cond.png", plot=condi)
+
+
+########################################## CLUSTERING AND ANNOTATION  ###################################################################################
+# Identify markers for each cluster
+pbmc.markers <- FindAllMarkers(pbmc.merge , only.pos = TRUE)
+pbmc.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1)
+# Save markers to CSV for future reference or review
+write.csv(pbmc.markers, "KLH_Neg_FindallMarkers_After_UMAP.csv")
+str(pbmc.markers)
+#############                                       ANNOTATE   #
+# Setup OpenAI API key
+### Annotation by ChatGTP-4 https://github.com/Winnie09/GPTCelltype?tab=readme-ov-file################
+# IMPORTANT! Assign your OpenAI API key. See Vignette for details
+Sys.setenv(OPENAI_API_KEY = "key")
+# Load packages
+library(GPTCelltype)
+library(openai)
+# Annotate cell types
+res <- gptcelltype(pbmc.markers, model = 'gpt-4')
+# Assign cell type annotation back to Seurat object
+pbmc.merge@meta.data$celltype <- as.factor(res[as.character(Idents(pbmc.merge))])
+umap_intgr_by_sample <- DimPlot(pbmc.merge, reduction = "umap", group.by = c("celltype", "orig.ident"))
+umap_intgr_by_sample
+# Save annotated Seurat object for reuse
+saveRDS(pbmc.merge, file = "intgr_clustering_KLH_Neg.rds")
+# Optionally save a plot with the new annotations
+ggsave("intgr_clustering_KLH_Neg.png", plot = last_plot(), width = 15, height = 8, dpi = 300)
+######################################### ADD CELL IDENTITY ################################################################################################################
+# Concatenate the cell type and sample ID in the metadata for later use as identifiers
+# Reassign GPT-4 based annotations to the existing Seurat object
+pbmc.merge@meta.data$celltype <- as.factor(res[as.character(Idents(pbmc.merge))])
+# Add combined annotations: cell type (from GPT-4) + sample identifier
+pbmc.merge$celltype.sample <- paste(pbmc.merge$celltype, pbmc.merge$orig.ident, sep = "_")
+saveRDS(pbmc.merge, file = "annotated_KLH_Neg.rds")
+# Confirm this step assigns expected labels. Inspect top rows
+head(pbmc.merge@meta.data)
+# Define identities based on the concatenated cell type and sample annotations
+Idents(pbmc.merge) <- "celltype.sample"
+# Check existing identities in the object
+unique_idents <- unique(Idents(pbmc.merge))
+print(unique_idents)
+levels(Idents(pbmc.merge)) <- trimws(levels(Idents(pbmc.merge)))
+print(unique(Idents(pbmc.merge)))
+######################################### B cell comparison ################################################################################################################
+# Perform differential expression analysis for B cells in the two samples
+B_cells_de <- FindMarkers(
+  pbmc.merge, 
+  ident.1 = "Monocytes_PBMCs_Sample11", 
+  ident.2 = "Monocytes_SAMPLEN", # Ensure this label matches your data exactly
+  features = "Cd19",
+  test.use = "wilcox",
+  verbose = FALSE
+)
+B_cells_de
+############################### comparison of genes by cell type ###################################################
+# Load necessary libraries
+# Load necessary libraries
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(writexl)
+library(gridExtra)  # For arranging multiple ggplot objects
+library(ggpubr)     # For adding statistical annotations
+# Get all unique identities from the Seurat object
+unique_idents <- unique(Idents(pbmc.merge))
+# Initialize an empty list to store results and plots
+results_list <- list()
+violin_plots <- list()
+# Loop through each unique identity that corresponds to Sample11
+for (cell_type in unique_idents) {
+  # Check if the identity is from Sample11
+  if (grepl("_PBMCs_Sample11$", cell_type)) {
+    # Extract the base type by removing the suffix
+    base_type <- sub("_PBMCs_Sample11$", "", cell_type)  # e.g., "Monocytes"
+    # Define ident1 and ident2
+    ident1 <- cell_type  # e.g., "Monocytes_PBMCs_Sample11"
+    ident2 <- paste0(base_type, "_SAMPLEN")  # e.g., "Monocytes_SAMPLEN"
+    # Print the identities to debug what's being constructed
+    print(paste("Comparing:", ident1, "with", ident2))
+    # Check if both identities exist in the Seurat object
+    if (ident1 %in% unique_idents && ident2 %in% unique_idents) {
+      # Perform FindMarkers
+      cell_de <- FindMarkers(
+        pbmc.merge,
+        ident.1 = ident1,
+        ident.2 = ident2,
+        features = "Cd19",
+        test.use = "wilcox",
+        verbose = FALSE
+      )
+      # Check if there are results in cell_de
+      if (nrow(cell_de) > 0) {
+        # Add the cell type to the results
+        cell_de$cell_type <- base_type
+        results_list[[base_type]] <- cell_de
+        
+        # Generate a violin plot for the current comparison
+        violin_plot <- VlnPlot(pbmc.merge,
+                               features = "Cd19",
+                               group.by = "orig.ident",  # Using orig.ident to distinguish samples
+                               pt.size = 0.1
+        ) +
+          ggtitle(paste("Cd19 Expression for:", base_type)) 
+        # stat_compare_means(method = "wilcox.test", label = "p.format")
+        
+        # Add the p-value to the plot if it exists
+        if ("p_val" %in% colnames(cell_de)) {
+          p_value <- cell_de$p_val[1]  # Get p-value for the comparison
+          violin_plot <- violin_plot +
+            annotate("text",
+                     x = 1.5, 
+                     y = 5,
+                     label = paste("p-value:", format(p_value, digits = 2)),
+                     size = 5)
+        }
+        # Store the violin plot
+        violin_plots[[base_type]] <- violin_plot
+      } else {
+        message(paste("FindMarkers found no differentially expressed genes for:", ident1, "vs", ident2))
+      }
+    } else {
+      message(paste("Identities not found for:", ident1, "or", ident2))
+    }
+  }
+}
+# Combine the results into a single data frame
+combined_results <- bind_rows(results_list, .id = "cell_type")
+# Save the results to an Excel file
+write_xlsx(combined_results, "cell_type_comparisons.xlsx")
+# Combine all Violin plots in a single stacked plot
+combined_violin_plot <- grid.arrange(grobs = violin_plots, ncol = 5)  # Adjust ncol for better layout
+# Save the combined violin plot
+ggsave("combined_violin_plots.png", plot = combined_violin_plot, width = 25, height = 12, dpi = 300)
+# Print a message to indicate completion
+print("Comparison results saved to 'cell_type_comparisons.xlsx' and combined violin plots saved to 'combined_violin_plots.png'.")
+
+
+
+
+###################################################################################################################################################
+# Display the top differentially expressed genes among B cells
+head(B_cells_de, n = 10)
+# Save DE results for further inspection
+write.csv(B_cells_de, "B_cells_DE_resultsKLH_Neg_joinlayers.csv")
+# Assume the Seurat object is named 'intgr'
+# Set identities to ensure they use the correct metadata column
+Idents(intgr1) <- "celltype.sample"
+# Extract CD19 expression for B cells in both groups
+b_cells_sample11 <- FetchData(intgr1, vars = "Cd19", cells = WhichCells(intgr, idents = "B cells_PBMCs_Sample11"))
+b_cells_sample1 <- FetchData(intgr1, vars = "Cd19", cells = WhichCells(intgr, idents = "B cells_SAMPLEN"))
+# Create a combined data frame
+cd19_expression_df <- data.frame(
+  Expression = c(b_cells_sample11$Cd19, b_cells_sample1$Cd19),
+  Sample = c(rep("Sample11", nrow(b_cells_sample11)), rep("Sample1", nrow(b_cells_sample1)))
+)
+# Plotting with ggplot2
+ggplot(cd19_expression_df, aes(x = Sample, y = Expression, fill = Sample)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  geom_jitter(width = 0.1, size = 1.5, color = "black") +
+  ggtitle("CD19 Expression in B Cells Across Samples") +
+  xlab("Sample") +
+  ylab("CD19 Expression") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+# Save the plot
+ggsave("cd19_expression_b_cells_violin_plot.png", width = 10, height = 8, dpi = 300, units = "in", limitsize = FALSE)
+
+
+
+
