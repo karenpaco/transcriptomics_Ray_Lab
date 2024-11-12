@@ -1,0 +1,75 @@
+library(Seurat)
+library(ggplot2)
+
+# Load and preprocess the data as before
+sample11.data <- Read10X(data.dir = 'C:/Users/karen/Documents/NIH_project/Transcriptomics/Sample11_multi_KPrun/sample_filtered_feature_bc_matrix')
+obj1 <- CreateSeuratObject(counts = sample11.data, project = "SAMPLE11")
+
+sampleN.data <- Read10X(data.dir ="C:/Users/karen/Documents/NIH_project/Transcriptomics/SC3_v3_NextGem_DI_CellPlex_Mouse_PBMC_10K_PBMCs_mouse_1_count_sample_feature_bc_matrix/sample_feature_bc_matrix")
+gene_expr <- sampleN.data[["Gene Expression"]]
+obj2 <- CreateSeuratObject(counts = gene_expr, project = "SAMPLEN")
+
+# Merge the objects and perform integration steps
+obj.merged <- merge(obj1, y = obj2, add.cell.ids = c("Sample11", "Sample1"))
+intgr <- NormalizeData(obj.merged)
+intgr <- FindVariableFeatures(intgr)
+intgr <- ScaleData(intgr)
+intgr <- RunPCA(intgr)
+
+# Re-join layers after integration
+intgr[["RNA"]] <- JoinLayers(intgr[["RNA"]])
+
+# Perform neighbor finding and clustering
+intgr <- FindNeighbors(intgr, reduction = "pca", dims = 1:30)
+intgr <- FindClusters(intgr, resolution = 1)
+intgr_umap <- RunUMAP(intgr, dims = 1:30, reduction = "pca", reduction.name = "umap.integrated", label = TRUE)
+
+# Monte Carlo iterations (e.g., 100 iterations)
+n_iter <- 100
+avg_cd19_vals_sample11 <- numeric(n_iter)
+avg_cd19_vals_sample1 <- numeric(n_iter)
+
+set.seed(111)
+
+for (i in 1:n_iter) {
+  # Sample cells from obj1
+  sampled_cells <- sample(rownames(obj1@meta.data), size = nrow(obj2@meta.data), replace = FALSE)
+  sampled_cells_pref <- paste0("Sample11_", sampled_cells)
+  obj2_cells_pref <- paste0("Sample1_", rownames(obj2@meta.data))
+  cells_subset <- c(sampled_cells_pref, obj2_cells_pref)
+  
+  # Subset the merged object
+  obj_sub <- subset(intgr_umap, cells = cells_subset)
+  
+  # Normalize and scale the subset
+  obj_sub <- NormalizeData(obj_sub)
+  obj_sub <- ScaleData(obj_sub)
+  
+  # Extract CD19 expression for both Sample11 and Sample1
+  cd19_expr_sample11 <- FetchData(obj_sub, vars = "Cd19", cells = sampled_cells_pref)
+  cd19_expr_sample1 <- FetchData(obj_sub, vars = "Cd19", cells = obj2_cells_pref)
+  
+  # Calculate the average CD19 expression for both samples
+  avg_cd19_vals_sample11[i] <- mean(cd19_expr_sample11$Cd19, na.rm = TRUE)
+  avg_cd19_vals_sample1[i] <- mean(cd19_expr_sample1$Cd19, na.rm = TRUE)
+}
+
+# Create a data frame for plotting
+cd19_df <- data.frame(
+  Iteration = rep(1:n_iter, 2),
+  Avg_CD19 = c(avg_cd19_vals_sample11, avg_cd19_vals_sample1),
+  Sample = rep(c("Sample11", "Sample1"), each = n_iter)
+)
+
+# Violin plot with points for each iteration
+ggplot(cd19_df, aes(x = Sample, y = Avg_CD19, fill = Sample)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  geom_jitter(width = 0.1, size = 2, color = "black") +
+  ggtitle("CD19 Expression Across 100 Monte Carlo Iterations for Two Samples") +
+  xlab("Sample") +
+  ylab("Average CD19 Expression") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Save the plot
+ggsave("cd19_violin_expression_100_iterations_two_samples.png", width = 10, height = 8, dpi = 300, units = "in", limitsize = FALSE)
