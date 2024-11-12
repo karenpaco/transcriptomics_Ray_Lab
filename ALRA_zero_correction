@@ -1,0 +1,175 @@
+library(Seurat)
+options(Seurat.object.assay.version = "v3")
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(SeuratData)
+library(SeuratWrappers)
+library(ALRA)
+
+# Load the PBMC dataset
+data_dir <- "C:/Downloads/sample_filtered_feature_bc_matrix"
+pbmc.data <- Read10X(data.dir = data_dir)
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "PBMCs_Sample11", min.cells = 3, min.features = 200)
+pbmc
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^mt-")
+################
+# Perform subsetting based on criteria
+obj1 <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & percent.mt < 8 & nCount_RNA <10000 & nCount_RNA >2000)
+initial_cell_count <- ncol(obj1)
+# # Visualize QC metrics as a violin plot
+# Use plots for QC metrics to filter cells
+png('vlnplot_qcf.png', width = 1200, height = 1200)
+VlnPlot(obj1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),ncol = 3, assay = "RNA" )
+dev.off()
+########################################################################################################################################
+#Combine samples into one object
+sampleN.data <- Read10X(data.dir ="C:/Users/karen/Documents/NIH_project/Transcriptomics/SC3_v3_NextGem_DI_CellPlex_Mouse_PBMC_10K_PBMCs_mouse_1_count_sample_feature_bc_matrix/sample_feature_bc_matrix")
+pbmc2 <- sampleN.data[["Gene Expression"]]
+pbmc2 <- CreateSeuratObject(counts = sampleN.data[["Gene Expression"]], project = "SAMPLEN", min.cells = 3, min.features = 200)
+pbmc2[["percent.mt"]] <- PercentageFeatureSet(pbmc2, pattern = "^mt-")
+obj2 <- subset(pbmc2, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & percent.mt < 8 & nCount_RNA <10000 & nCount_RNA >2000)
+# For object 1 (KLH)
+obj1@meta.data$condition <- "KLH"
+# For object 2 (Neg)
+obj2@meta.data$condition <- "Neg"
+initial_cell_count2 <- ncol(obj2)
+print(initial_cell_count)
+print(initial_cell_count2)
+###############################################  DOWNSAMPLE TO HAVE SAME NUMBER OF CELLS IN BOTH GROUPS/MERGE #########################################################################################
+# Downsample the number of cells per identity class
+subset_obj1<- subset(x = obj1, downsample = 2121)
+#merge both objects
+pbmc.merge <- merge(subset_obj1, y = c(obj2), add.cell.ids = c("Sample11", "Sample1"))
+View(pbmc.merge)
+# Normalize the data
+norm <- NormalizeData(pbmc.merge)
+alra_dat <- RunALRA(obj = norm)
+View(alra_dat)
+################ test
+# List of gene features you want to plot
+feature_names <- c("Gapdh", "Actb","Cd19")  # Add your genes here
+condition <- "condition"  # Metadata field to split by
+
+# List to store plots
+plots <- list()
+combined_plots <- list()  # To store combined plots for each gene
+# List to store all combined gene plots for the final stacked plot
+final_combined_plots <- list()  
+# Define your seurat objects
+seurat_objects <- list(Raw_data = pbmc.merge, Normalized = norm, alra=alra_dat)
+# Loop through each gene feature
+for (feature_name in feature_names) {
+  # Store plots for each object for this feature
+  for (name in names(seurat_objects)) {
+    obj <- seurat_objects[[name]]
+    # Create the violin plot for the current object
+    p <- VlnPlot(
+      object = obj,
+      features = feature_name,
+      split.by = condition,  # Assuming you want to split by condition
+      pt.size = 1
+    ) +
+      ggtitle(paste("Violin Plot of", feature_name, "Expression in", name)) +
+      #stat_compare_means() +
+      theme_minimal()
+    
+    # Save each individual plot to the list
+    plots[[paste(name, feature_name, sep = "_")]] <- p
+    
+    # Save each plot to a file
+    ggsave(
+      filename = paste0("ViolinPlot_", feature_name, "_", name, ".png"),
+      plot = p,
+      width = 10,
+      height = 8,
+      dpi = 300
+    )
+    
+    # Add the current plot to combined plot list
+    combined_plots[[name]] <- p  # Store the latest plot per object to combine later
+  }
+  
+  # Combine plots for this gene across different conditions
+  combined_gene_plot <- plot_grid(plotlist = combined_plots, ncol = 1)  # Plot them vertically
+  # Save combined plot for Genes
+  ggsave(
+    filename = paste0("Combined_ViolinPlot_", feature_name, ".png"),  # File name
+    plot = combined_gene_plot,                 # Plot object
+    width = 10,                                # Width in inches
+    height = 12,                              # Height in inches
+    dpi = 300                                  # Resolution in dots per inch
+  )
+  # Store combined plot in final list for later stacking
+  final_combined_plots[[feature_name]] <- combined_gene_plot
+  # Clear combined_plots for the next gene
+  combined_plots <- list()
+}
+# Now combine all final combined plots into a single stacked plot
+all_combined_plot <- plot_grid(plotlist = final_combined_plots, ncol = length(feature_names))  # Stack vertically
+# Save the stacked combined plots
+ggsave(
+  filename = "Stacked_Combined_ViolinPlots_Alra_HKG_Cd19.png",  # File name
+  plot = all_combined_plot,                        # Combined plot object
+  width = 30,                                      # Width in inches
+  height = 10,                                    # Height in inches (adjust based on number of genes)
+  dpi = 300                                        # Resolution in dots per inch
+)
+# If you want to print to console (optional)
+# Print individual plots in R console
+for (name in names(seurat_objects)) {
+  for (feature_name in feature_names) {
+    print(plots[[paste(name, feature_name, sep = "_")]])
+  }
+}
+
+
+#var<- FindVariableFeatures(norm)
+#scale.data <- ScaleData(var)
+
+################# 
+############################################### DIFFERENTIAL EXPRESSION FROM NORMALIZED DATA #########################################################################################
+#norm_join <- JoinLayers(norm)
+DE <- FindMarkers(
+  alra_dat,
+  ident.1 = "PBMCs_Sample11",
+  ident.2 = "SAMPLEN",
+  test.use ="wilcox",
+  features="",
+  verbose = FALSE)
+print(DE)
+
+#alra_dat[["RNA5"]] <- as(alra_dat[["alra"]], Class="Assay5")
+
+intgr<- FindVariableFeatures(alra_dat)
+intgr <- ScaleData(intgr)
+intgr <- RunPCA(scale.data)
+
+
+#perform integration after PCA
+split1 <- alra_dat@assays$RNA5@layers
+View(alra_dat)
+intgr<- FindVariableFeatures(split1)
+intgr <- ScaleData(intgr)
+intgr <- RunPCA(intgr)
+intgr <- IntegrateLayers(object = intgr, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca",
+                         verbose = FALSE)
+print(intgr@reductions$pca)
+#re-join layers after integration
+intgr[["RNA"]] <- JoinLayers(intgr[["RNA"]])
+# Find neighbors and clusters
+intgr <- FindNeighbors(intgr, dims = 1:30)
+intgr <- FindClusters(intgr, resolution = 0.5)
+# Run UMAP for visualization
+intgr <- RunUMAP(intgr, dims = 1:30)
+print(intgr@reductions$umap)
+# Plot to inspect clusters
+DimPlot(intgr, reduction = "umap", label = TRUE)
+########################################## CLUSTERING AND ANNOTATION  ###################################################################################
+# Identify markers for each cluster
+pbmc.markers <- FindAllMarkers(intgr, only.pos = TRUE)
+pbmc.markers <- pbmc.markers %>% group_by(cluster) %>% dplyr::filter(avg_log2FC > 1)
+# Save markers to CSV for future reference or review
+write.csv(pbmc.markers, "KLH_Neg_FindallMarkers_After_UMAP.csv")
+
